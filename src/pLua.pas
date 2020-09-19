@@ -9,7 +9,11 @@ unit pLua;
 
   Changes:
 
-  * 16.09.2020, FD - Fixed occasional crash with plua_SetLocal.  
+  * 18.09.2020, FD - Added plua_validateargs and plua_validatetype functions.
+  * 17.09.2020, FD - plua_functionexists now checks C function.
+  Older function renamed to plua_functionexists_noc.
+                   - Added plua_pushintnumber
+  * 16.09.2020, FD - Fixed occasional crash with plua_SetLocal.
   * 30.11.2015, FD - Fixed occasional crash with plua_functionexists.
   * 26.06.2014, FD - Changed to work with string instead of ansistring.
   * 18.06.2014, FD - Added several functions for getting/setting the
@@ -43,16 +47,26 @@ type
   LuaException = class(Exception)
   end;
 
+type
+  TLuaValidationResult = record
+    OK:boolean;
+    ErrorMessage:string;
+  end;
+
 procedure plua_RegisterLuaTable(L: PLua_State; Name: string;
   Reader: lua_CFunction = nil; Writer: lua_CFunction = nil;
   TableIndex: Integer = LUA_GLOBALSINDEX);
 
 function plua_functionexists(L: PLua_State; FunctionName: string;
   TableIndex: Integer = LUA_GLOBALSINDEX): boolean;
+function plua_functionexists_noc(L: PLua_State; FunctionName: string;
+  TableIndex: Integer): boolean;
 
 function plua_callfunction(L: PLua_State; FunctionName: string;
   const args: Array of Variant; results: PVariantArray = nil;
   TableIndex: Integer = LUA_GLOBALSINDEX): Integer;
+
+procedure plua_pushintnumber(L: PLua_State; N: Integer);
 
 procedure plua_pushvariant(L: PLua_State; v: Variant);
 
@@ -93,34 +107,106 @@ procedure plua_SetLocal(L: PLua_State; varName: string; const AValue: Variant);
 function plua_LuaStackToStr(L: Plua_State; Index: Integer; MaxTable: Integer; SubTableMax: Integer): string;
 function plua_dequote(const QuotedStr: string): string;
 
+// Lua validation functions
+function plua_validatetype(L: plua_State; const idx, aluatype:integer):boolean;
+function plua_validateargs(L: plua_State; var luaresult:integer; const p:array of integer;const optional:integer=0):TLuaValidationResult;
+
 implementation
+
+function plua_validatetype(L: plua_State; const idx, aluatype:integer):boolean;
+begin
+  result := lua_type(L, idx) = aluatype;
+end;
+
+// This function makes very easy to validate arguments passed to a C function
+// with just a single line
+// Usage example:
+// function str_after(L: plua_State): integer; cdecl;
+// begin
+//   if plua_validateargs(L, result, [LUA_TSTRING, LUA_TSTRING]).OK then
+//     lua_pushstring(L, after(lua_tostring(L, 1), lua_tostring(L, 2)));
+// end;
+function plua_validateargs(L: plua_State; var luaresult:integer; const p:array of integer;const optional:integer=0):TLuaValidationResult;
+var
+ i, idx, min_args, max_args, num_args:integer;
+begin
+  luaresult := 1;
+  result.OK := true;
+  num_args := lua_gettop(L);
+  min_args := (high(p) +1) -optional;
+  max_args := (high(p) +1) +optional;
+  if num_args < min_args then begin
+    result.OK := false;
+    if optional > 0 then
+    result.ErrorMessage := 'missing arguments, '+IntToStr(max_args)+' expected, '+IntToStr(optional)+' optional). ' else
+    result.ErrorMessage := 'missing arguments, '+IntToStr(min_args)+' expected';
+    luaL_error(L, PAnsiChar(AnsiString(result.ErrorMessage)));
+  end;
+  if num_args > max_args then begin
+    result.OK := false;
+    result.ErrorMessage := 'too many arguments, max '+IntToStr(max_args)+' allowed';
+    luaL_error(L, PAnsiChar(AnsiString(result.ErrorMessage)));
+  end;
+  // Use num_args instead of high(p) because we only want to validated provided arguments
+  for i := low(p) to num_args-1 do
+  begin
+    idx := i+1;
+    if plua_validatetype(L, idx, p[i]) = false then begin
+      result.OK := false;
+      result.ErrorMessage := 'argument #'+IntToStr(idx)+' must be '+plua_luatypetokeyword(p[i]);
+      luaL_typerror(L, idx, PAnsiChar(AnsiString(plua_luatypetokeyword(p[i]))));
+    end;
+  end;
+end;
 
 function plua_luatypetokeyword(const LuaType: integer): string;
 begin
   result := emptystr;
   case LuaType of
+    LUA_TNIL:
+      result := 'nil';
     LUA_TSTRING:
       result := 'string';
     LUA_TBOOLEAN:
       result := 'boolean';
     LUA_TNUMBER:
       result := 'integer';
-    LUA_TNIL:
-      result := 'nil';
+    LUA_TTABLE:
+      result := 'table';
+    LUA_TFUNCTION:
+      result := 'function';
+    LUA_TTHREAD:
+      result := 'thread';
+    LUA_TLIGHTUSERDATA:
+      result := 'lightuserdata';
+    LUA_TUSERDATA:
+      result := 'userdata';
   end;
 end;
 
 function plua_keywordtoluatype(const keyword: string): integer;
 begin
   result := LUA_TNONE;
+  if keyword = 'none' then
+    result := LUA_TNONE else
+  if keyword = 'nil' then
+    result := LUA_TNIL else
   if keyword = 'string' then
     result := LUA_TSTRING else
   if keyword = 'boolean' then
     result := LUA_TBOOLEAN else
   if keyword = 'integer' then
     result := LUA_TNUMBER else
-  if keyword = 'nil' then
-    result := LUA_TNIL;
+  if keyword = 'table' then
+    result := LUA_TTABLE else
+  if keyword = 'function' then
+    result := LUA_TFUNCTION else
+  if keyword = 'thread' then
+    result := LUA_TTHREAD else
+  if keyword = 'lightuserdata' then
+    result := LUA_TLIGHTUSERDATA else
+  if keyword = 'userdata' then
+    result := LUA_TUSERDATA;
 end;
 
 function plua_toansistring(L: PLua_State; Index: Integer): ansistring;
@@ -167,14 +253,39 @@ end;
 function plua_functionexists(L: PLua_State; FunctionName: string;
   TableIndex: Integer): boolean;
 begin
+  if TableIndex = LUA_GLOBALSINDEX then
+    lua_getglobal(L, 'tostring'); // FD: fixes global function sometimes not being located
   lua_pushstring(L, FunctionName);
   lua_rawget(L, TableIndex);
+
+  try
   Result := (not lua_isnil(L, lua_gettop(L))) and lua_isfunction(L, lua_gettop(L));
-  lua_pop(L, 1); // FD: added lua_isnil check and lua_pop. Fixes occasional exception
+  finally
+   lua_pop(L, 1); // FD: added lua_isnil check and lua_pop. Fixes occasional exception
+  end;
+
+end;
+
+function plua_functionexists_noc(L: PLua_State; FunctionName: string;
+  TableIndex: Integer): boolean;
+begin
+  if TableIndex = LUA_GLOBALSINDEX then
+    lua_getglobal(L, 'tostring'); // FD: fixes global function sometimes not being located
+  lua_pushstring(L, FunctionName);
+  lua_rawget(L, TableIndex);
+  try
+  Result := (not lua_isnil(L, lua_gettop(L))) and lua_isfunction(L, lua_gettop(L));
+  finally
+    lua_pop(L, 1); // FD: added lua_isnil check and lua_pop. Fixes occasional exception
+  end;
+
   if Result then
   begin
+    try
     Result := not lua_iscfunction(L, lua_gettop(L));
-    lua_pop(L, 1);
+    finally
+      lua_pop(L, 1);
+    end;
   end;
 end;
 
@@ -204,6 +315,13 @@ begin
     for i := 0 to Result - 1 do
       results^[Result - i - 1] := plua_tovariant(L, -(i + 1));
   end;
+end;
+
+// Just an alias for lua_pushnumber() - Use this if you experience conversion
+// issues with negative integers and Lua 64-bit when using lua_pushinteger()
+procedure plua_pushintnumber(L: PLua_State; N: Integer);
+begin
+  lua_pushnumber(L, N);
 end;
 
 procedure plua_pushvariant(L: PLua_State; v: Variant);
