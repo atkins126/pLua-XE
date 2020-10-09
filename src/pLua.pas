@@ -2,24 +2,32 @@ unit pLua;
 
 {
   Copyright (c) 2007 Jeremy Darling
-  Modifications copyright (c) 2010-2020 Felipe Daragon
+  Modifications and additions copyright (c) 2010-2020 Felipe Daragon
 
   License: MIT (http://opensource.org/licenses/mit-license.php)
   Same as the original code by Jeremy Darling.
 
   Changes:
 
+  * 07.10.2020, FD - Added plua_tovariantrec for storing the lua type and
+    value converted to Variant
+  * 29.09.2020, FD - Validate LUA_TNIL in argument when requested
+  * 26.09.2020, FD - Added new functions for method call validation and
+    improved validation functions
+  * 25.09.2020, FD - Added plua_LocateCFunctionInArray and
+    plua_pushcfunction_fromarray
+  * 24.09.2020, FD - Added plua_tablefunctionexists and plua_tablecallfunction.
+  * 21.09.2020, FD - Added strict type validation functions
   * 20.09.2020, FD - Added plua_validateargsets and plua_validateargscount,
     and improved validation functions.
   * 18.09.2020, FD - Added plua_validateargs and plua_validatetype functions.
   * 17.09.2020, FD - plua_functionexists now checks C function.
-  Older function renamed to plua_functionexists_noc.
                    - Added plua_pushintnumber
   * 16.09.2020, FD - Fixed occasional crash with plua_SetLocal.
   * 30.11.2015, FD - Fixed occasional crash with plua_functionexists.
   * 26.06.2014, FD - Changed to work with string instead of ansistring.
   * 18.06.2014, FD - Added several functions for getting/setting the
-  value of local/global Lua variables
+    value of local/global Lua variables
   * 17.06.2014, FD - Added plua_dostring
   * 19.05.2014, FD - Added backwards compatibility with non-unicode Delphi.
   * 06.05.2013, FD - Added support for Delphi XE2 or higher.
@@ -27,9 +35,12 @@ unit pLua;
 
 {$IFDEF FPC}
 {$mode objfpc}{$H+}
+{$modeswitch nestedprocvars}
 {$ENDIF}
 
 interface
+
+{$I Lua.inc}
 
 uses
   SysUtils, Classes, Variants, Lua;
@@ -54,9 +65,8 @@ procedure plua_RegisterLuaTable(L: PLua_State; Name: string;
   TableIndex: Integer = LUA_GLOBALSINDEX);
 
 function plua_functionexists(L: PLua_State; FunctionName: string;
-  TableIndex: Integer = LUA_GLOBALSINDEX): boolean;
-function plua_functionexists_noc(L: PLua_State; FunctionName: string;
-  TableIndex: Integer): boolean;
+  TableIndex: Integer = LUA_GLOBALSINDEX;
+  const allowcfunction:boolean=true): boolean;
 
 function plua_callfunction(L: PLua_State; FunctionName: string;
   const args: Array of Variant; results: PVariantArray = nil;
@@ -85,17 +95,37 @@ procedure plua_GetTableKey(L: PLua_State; TableIndex: Integer; KeyName: string);
 procedure plua_pushansistring(L: PLua_State; AString: ansistring);
 function plua_toansistring(L: PLua_State; Index: Integer): ansistring;
 
-{ FD Additions }
+{ FD: Additions by Felipe Daragon }
 
 type
   TLuaTypeRange = 1..9; // LUA_TSTRING, etc.
   TLuaTypeSet = set of 1..9; // LUA_TSTRING, etc.
 
 type
-  TLuaValidationResult = record
+  TLuaFunctionSearchResult = record
+    found : boolean;
+    reg: luaL_Reg;
+  end;
+
+type
+  TValuaResult = record
     OK:boolean;
     ErrorMessage:string;
     ArgsCount:integer;
+    ArgsCountFromTop:integer;
+  end;
+
+type
+  TVaLuaSettings = record
+    optional:integer;
+    ignore:integer;
+    stricttype:boolean;
+  end;
+
+type
+  TLuaVariantRec = record
+    LuaType: integer;
+    Value: Variant;
   end;
 
 procedure plua_dostring(L: PLua_State; AString: String);
@@ -103,6 +133,16 @@ function plua_AnyToString(L: PLua_State; idx: Integer): string;
 function plua_typetokeyword(const LuaType: integer): string;
 function plua_typesettokeyword(const ts: TLuaTypeSet): string;
 function plua_keywordtotype(const keyword: string): integer;
+function plua_tovariantrec(L: PLua_State; idx: Integer): TLuaVariantRec;
+
+// Checks if table contains function and calls function
+function plua_tablefunctionexists(L: PLua_State; TableName: string;
+  FunctionName: string; TableIndex: Integer = LUA_GLOBALSINDEX;
+  const allowcfunction:boolean=true):boolean;
+function plua_tablecallfunction(L: PLua_State; TableName: string;
+  FunctionName: string; const args: Array of Variant;
+  results: PVariantArray = nil;
+  TableIndex: Integer = LUA_GLOBALSINDEX): Integer;
 
 // Gets or sets the value of local and global Lua variables
 function plua_GetLuaVar(L: PLua_State; idx: Integer): Variant;
@@ -116,41 +156,115 @@ function plua_LuaStackToStr(L: Plua_State; Index: Integer; MaxTable: Integer;
   SubTableMax: Integer): string;
 function plua_dequote(const QuotedStr: string): string;
 
-// Lua validation functions
+{ Lua argument validation functions
+  Proudly present these functions that simplify the process of validating
+  arguments passed to a C function so it can be done with a single line of code
+}
+type
+  TValuaOptions = (
+    vaStrict,
+    vaMethod,
+    vaOptional1,
+    vaOptional2,
+    vaOptional3
+    );
+  TValuaOptionSet = set of TValuaOptions;
+function plua_matchtypeset(L: plua_State;const idx:integer;const ts:TLuaTypeSet;
+  const stricttype:boolean=false):boolean;
 function plua_validateargs(L: plua_State; var luaresult:integer;
-  const p:array of TLuaTypeRange;const optional:integer=0):TLuaValidationResult;
+  const p:array of TLuaTypeRange;
+  const options:TValuaOptionset=[]):TValuaResult;
 function plua_validateargsets(L: plua_State; var luaresult:integer;
-  const p:array of TLuaTypeSet;const optional:integer=0):TLuaValidationResult;
+  const p:array of TLuaTypeSet; const options:TValuaOptionset=[]):TValuaResult;
 function plua_validateargscount(L: plua_State; var luaresult:integer;
-  const max_args:integer; const optional:integer=0):TLuaValidationResult;
+  const max_args:integer; const options:TValuaOptionset=[]):TValuaResult;
 function plua_validatetype(L: plua_State; const idx, expectedluatype:integer;
-  const allowconv:boolean=false):boolean;
+  const stricttype:boolean=false):boolean;
+
+// These can be used with colon-separated method calls to a Lua object
+function plua_validatemethodargs(L: plua_State; var luaresult:integer;
+  const p:array of TLuaTypeRange;
+  const options:TValuaOptionset=[]):TValuaResult;
+function plua_validatemethodargsets(L: plua_State; var luaresult:integer;
+  const p:array of TLuaTypeSet; const options:TValuaOptionset=[]):TValuaResult;
+
+// Allow to locate and push a C function contained in an array of luaL_reg
+function plua_LocateCFunctionInArray(const name: string;
+  table: array of luaL_reg): TLuaFunctionSearchResult;
+function plua_pushcfunction_fromarray(L: plua_State; const name: string;
+  table: array of luaL_reg):integer;
 
 
 implementation
 
-// This function makes very easy to validate arguments passed to a C function
-// with just a single line
-// Usage example:
-// function str_after(L: plua_State): integer; cdecl;
-// begin
-//   if plua_validateargs(L, result, [LUA_TSTRING, LUA_TSTRING]).OK then
-//     lua_pushstring(L, after(lua_tostring(L, 1), lua_tostring(L, 2)));
-// end;
-function plua_validateargs(L: plua_State; var luaresult:integer;
-  const p:array of TLuaTypeRange;const optional:integer=0):TLuaValidationResult;
-var
- i, idx:integer;
+function plua_argvalidationset_tosettings(options:TValuaOptionset):TVaLuaSettings;
 begin
-  result := plua_validateargscount(L, luaresult, (high(p) +1), optional);
-  // Use ArgsCount instead of high(p) because we only want to validated provided arguments
+  result.optional := 0;
+  result.ignore := 0;
+  result.stricttype := vaStrict in options;
+  if vaMethod in options then
+   result.ignore := 1;
+  if vaOptional1 in options then
+   result.optional := 1;
+  if vaOptional2 in options then
+   result.optional := 2;
+  if vaOptional3 in options then
+   result.optional := 3;
+end;
+
+function plua_validatemethodcall(L: plua_State;const options:TValuaOptionset):TValuaResult;
+var
+ vs: TVaLuaSettings;
+begin
+  vs := plua_argvalidationset_tosettings(options);
+  result.OK := true;
+  if (vaMethod in options) and (plua_validatetype(L, 1, LUA_TTABLE) = false) then begin
+    result.OK := false;
+    result.ErrorMessage := 'regular function call not allowed, use colon instead of dot';
+    luaL_error(L, PAnsiChar(AnsiString(result.ErrorMessage)));
+  end;
+end;
+
+{
+  This function makes very easy to validate arguments passed to a C function
+  with just a single line
+
+  Validation example:
+  function str_after(L: plua_State): integer; cdecl;
+  begin
+  if plua_validateargs(L, result, [LUA_TSTRING, LUA_TSTRING]).OK then
+    lua_pushstring(L, after(lua_tostring(L, 1), lua_tostring(L, 2)));
+  end;
+
+  If you have optional arguments, remember to pass the number of optional
+  arguments to the fourth parameter. A max of 3 optional parameters is supported
+
+  If you need strict type validation, pass vaStrict to the fourth parameter.
+  This means for example that a number passed to C function that expects a string
+  will not be allowed to be converted to string
+}
+
+function plua_validateargs(L: plua_State; var luaresult:integer;
+  const p:array of TLuaTypeRange;
+  const options:TValuaOptionset=[]):TValuaResult;
+var
+ i, idx, startarg:integer;
+ vs: TVaLuaSettings;
+begin
+  vs := plua_argvalidationset_tosettings(options);
+  result := plua_validatemethodcall(L, options);
+  if result.OK then
+    result := plua_validateargscount(L, luaresult, (high(p) +1), options);
+  // Use ArgsCount instead of high(p) because we only want to validate provided arguments
+  if result.OK then
   for i := low(p) to result.ArgsCount-1 do
   begin
-    idx := i+1;
-    if plua_validatetype(L, idx, p[i], true) = false then begin
+    idx := i +1 +vs.ignore;
+    if plua_validatetype(L, idx, p[i], vs.stricttype) = false then begin
       result.OK := false;
       result.ErrorMessage := 'argument #'+IntToStr(idx)+' must be '+plua_typetokeyword(p[i]);
       luaL_typerror(L, idx, PAnsiChar(AnsiString(plua_typetokeyword(p[i]))));
+      Break;
     end;
   end;
 end;
@@ -160,50 +274,48 @@ end;
 // function somefunction(L: plua_State): integer; cdecl;
 // const firstarg = [LUA_TSTRING, LUA_TLUATABLE];
 // begin
-//   if plua_validateargsets(L, result, [firstarg, [LUA_TSTRING]]).OK then
-//     somefunction(L, after(lua_tostring(L, 1), lua_tostring(L, 2)));
+//   if plua_validateargsets(L, result, [firstarg, [LUA_TSTRING]]).OK then begin
+//     ...
+//   end;
 // end;
 function plua_validateargsets(L: plua_State; var luaresult:integer;
-  const p:array of TLuaTypeSet;const optional:integer=0):TLuaValidationResult;
+  const p:array of TLuaTypeSet;
+  const options:TValuaOptionset=[]):TValuaResult;
 var
   i, idx:integer;
-  ts: TLuaTypeSet;
-  matched:boolean;
-  procedure validate(const lt:integer);
-  begin
-    if plua_validatetype(L, idx, lt, true) then
-    matched := true;
-  end;
+  vs: TVaLuaSettings;
 begin
-  result := plua_validateargscount(L, luaresult, (high(p) +1), optional);
+  vs := plua_argvalidationset_tosettings(options);
+  result := plua_validatemethodcall(L, options);
+  if result.OK then
+    result := plua_validateargscount(L, luaresult, (high(p) +1), options);
   // Use ArgsCount instead of high(p) because we only want to validated provided arguments
+  if result.OK then
   for i := low(p) to result.ArgsCount-1 do
   begin
-    idx := i+1;
-    ts := p[i];
-    matched := false;
-    if LUA_TSTRING in ts then
-      validate(LUA_TSTRING);
-    if LUA_TBOOLEAN in ts then
-      validate(LUA_TBOOLEAN);
-    if LUA_TNUMBER in ts then
-      validate(LUA_TNUMBER);
-    if LUA_TTABLE in ts then
-      validate(LUA_TTABLE);
-    if LUA_TFUNCTION in ts then
-      validate(LUA_TFUNCTION);
-    if LUA_TTHREAD in ts then
-      validate(LUA_TTHREAD);
-    if LUA_TLIGHTUSERDATA in ts then
-      validate(LUA_TLIGHTUSERDATA);
-    if LUA_TUSERDATA in ts then
-      validate(LUA_TUSERDATA);
-    if matched = false then begin
+    idx := i +1 +vs.ignore;
+    if plua_matchtypeset(L, idx, p[i], vs.stricttype) = false then begin
       result.OK := false;
       result.ErrorMessage := 'argument #'+IntToStr(idx)+' must be '+plua_typesettokeyword(p[i]);
       luaL_typerror(L, idx, PAnsiChar(AnsiString(plua_typesettokeyword(p[i]))));
+      Break;
     end;
   end;
+end;
+
+// Same as above but for Method call validation
+function plua_validatemethodargs(L: plua_State; var luaresult:integer;
+  const p:array of TLuaTypeRange;
+  const options:TValuaOptionset=[]):TValuaResult;
+begin
+  result := plua_validateargs(L, luaresult, p, options + [vaMethod]);
+end;
+
+// Same as above but for Method call validation
+function plua_validatemethodargsets(L: plua_State; var luaresult:integer;
+  const p:array of TLuaTypeSet;const options:TValuaOptionset=[]):TValuaResult;
+begin
+  result := plua_validateargsets(L, luaresult, p, options + [vaMethod]);
 end;
 
 function plua_typesettokeyword(const ts: TLuaTypeSet): string;
@@ -234,19 +346,23 @@ begin
 end;
 
 function plua_validateargscount(L: plua_State; var luaresult:integer;
-  const max_args:integer; const optional:integer=0):TLuaValidationResult;
+  const max_args:integer; const options:TValuaOptionset=[]):TValuaResult;
 var
   min_args, num_args:integer;
+  vs: TVaLuaSettings;
 begin
+  vs := plua_argvalidationset_tosettings(options);
   luaresult := 1;
-  num_args := lua_gettop(L);
+  result.ArgsCountFromTop := lua_gettop(L);
+  num_args := result.ArgsCountFromTop -vs.ignore;
   result.ArgsCount := num_args;
   result.OK := true;
-  min_args := max_args -optional;
+  min_args := max_args -vs.optional;
+  //writeln('min:'+inttostr(min_args)+' max:'+inttostr(max_args)+' opt:'+inttostr(vs.optional));
   if num_args < min_args then begin
     result.OK := false;
-    if optional > 0 then
-    result.ErrorMessage := 'missing arguments, '+IntToStr(max_args)+' expected, '+IntToStr(optional)+' optional). ' else
+    if vs.optional > 0 then
+    result.ErrorMessage := 'missing arguments, '+IntToStr(max_args)+' expected, '+IntToStr(vs.optional)+' optional). ' else
     result.ErrorMessage := 'missing arguments, '+IntToStr(min_args)+' expected';
     luaL_error(L, PAnsiChar(AnsiString(result.ErrorMessage)));
   end;
@@ -258,7 +374,7 @@ begin
 end;
 
 function plua_validatetype(L: plua_State; const idx, expectedluatype:integer;
-  const allowconv:boolean=false):boolean;
+  const stricttype:boolean=false):boolean;
  function IsInteger(const s: string): Boolean;
  var
    v, c: integer;
@@ -273,7 +389,7 @@ var curluatype: integer;
 begin
   curluatype := lua_type(L, idx);
   result := curluatype = expectedluatype;
-  if (allowconv = true) and (result = false) then begin
+  if (stricttype = false) and (result = false) then begin
     // Expected a string, got number. Lua will convert number to string automatically
     // Example: string.upper(10) in Lua returns "10"
     if (expectedluatype = LUA_TSTRING) and (curluatype = LUA_TNUMBER) then
@@ -283,6 +399,35 @@ begin
     if (expectedluatype = LUA_TNUMBER) and (curluatype = LUA_TSTRING) and (IsInteger(lua_tostring(L, idx))) then
     result := true;
   end;
+end;
+
+function plua_matchtypeset(L: plua_State;const idx:integer;const ts:TLuaTypeSet;
+  const stricttype:boolean=false):boolean;
+  procedure validate(const lt:integer);
+  begin
+    if plua_validatetype(L, idx, lt, stricttype) then
+      result := true;
+  end;
+begin
+  result := false;
+  if LUA_TNIL in ts then
+    validate(LUA_TNIL);
+  if LUA_TSTRING in ts then
+    validate(LUA_TSTRING);
+  if LUA_TBOOLEAN in ts then
+    validate(LUA_TBOOLEAN);
+  if LUA_TNUMBER in ts then
+    validate(LUA_TNUMBER);
+  if LUA_TTABLE in ts then
+    validate(LUA_TTABLE);
+  if LUA_TFUNCTION in ts then
+    validate(LUA_TFUNCTION);
+  if LUA_TTHREAD in ts then
+    validate(LUA_TTHREAD);
+  if LUA_TLIGHTUSERDATA in ts then
+    validate(LUA_TLIGHTUSERDATA);
+  if LUA_TUSERDATA in ts then
+    validate(LUA_TUSERDATA);
 end;
 
 function plua_typetokeyword(const LuaType: integer): string;
@@ -377,7 +522,8 @@ begin
 end;
 
 function plua_functionexists(L: PLua_State; FunctionName: string;
-  TableIndex: Integer): boolean;
+  TableIndex: Integer = LUA_GLOBALSINDEX;
+  const allowcfunction:boolean=true): boolean;
 begin
   if TableIndex = LUA_GLOBALSINDEX then
     lua_getglobal(L, 'tostring'); // FD: fixes global function sometimes not being located
@@ -390,22 +536,7 @@ begin
    lua_pop(L, 1); // FD: added lua_isnil check and lua_pop. Fixes occasional exception
   end;
 
-end;
-
-function plua_functionexists_noc(L: PLua_State; FunctionName: string;
-  TableIndex: Integer): boolean;
-begin
-  if TableIndex = LUA_GLOBALSINDEX then
-    lua_getglobal(L, 'tostring'); // FD: fixes global function sometimes not being located
-  lua_pushstring(L, FunctionName);
-  lua_rawget(L, TableIndex);
-  try
-  Result := (not lua_isnil(L, lua_gettop(L))) and lua_isfunction(L, lua_gettop(L));
-  finally
-    lua_pop(L, 1); // FD: added lua_isnil check and lua_pop. Fixes occasional exception
-  end;
-
-  if Result then
+  if (Result = true) and (allowcfunction = false) then
   begin
     try
     Result := not lua_iscfunction(L, lua_gettop(L));
@@ -413,6 +544,32 @@ begin
       lua_pop(L, 1);
     end;
   end;
+
+end;
+
+function plua_tablefunctionexists(L: PLua_State; TableName: string;
+  FunctionName: string; TableIndex: Integer = LUA_GLOBALSINDEX;
+  const allowcfunction:boolean=true):boolean;
+begin
+  result := false;
+  if TableIndex = LUA_GLOBALSINDEX then
+    lua_getglobal(L, 'tostring');
+  lua_pushstring(L, TableName);
+  lua_rawget(L, TableIndex);
+  if lua_istable(L, lua_gettop(L)) then
+    result := plua_functionexists(L, FunctionName, -2, allowcfunction);
+end;
+
+function plua_tablecallfunction(L: PLua_State; TableName: string;
+  FunctionName: string; const args: Array of Variant;
+  results: PVariantArray = nil;
+  TableIndex: Integer = LUA_GLOBALSINDEX): Integer;
+begin
+  if TableIndex = LUA_GLOBALSINDEX then
+    lua_getglobal(L, 'tostring');
+  lua_pushstring(L, TableName);
+  lua_rawget(L, TableIndex);
+  result := plua_callfunction(L, FunctionName, args, results, -2);
 end;
 
 function plua_callfunction(L: PLua_State; FunctionName: string;
@@ -658,6 +815,12 @@ begin
   lua_pcall(L, 0, 0, 0);
 end;
 
+function plua_tovariantrec(L: PLua_State; idx: Integer): TLuaVariantRec;
+begin
+  result.LuaType := lua_type(L, idx);
+  result.Value := plua_tovariant(L, idx);
+end;
+
 // This is similar to lua_tostring but covers boolean and number Lua types
 function plua_AnyToString(L: PLua_State; idx: Integer): string;
 var
@@ -842,6 +1005,35 @@ begin
     plua_pushvariant(L, AValue);
     lua_settable(L, LUA_GLOBALSINDEX);
   end;
+end;
+
+function plua_LocateCFunctionInArray(const name: string;
+  table: array of luaL_reg): TLuaFunctionSearchResult;
+var
+  i: integer;
+begin
+  result.found := false;
+  for i := low(table) to high(table) do
+  begin
+    if ansistring(name) = table[i].name then begin
+      result.found := true;
+      result.reg := table[i];
+      break;
+    end;
+  end;
+end;
+
+function plua_pushcfunction_FromArray(L: plua_State; const name: string;
+  table: array of luaL_reg):integer;
+var
+  rs:TLuaFunctionSearchResult;
+begin
+ result := 0;
+ rs := plua_LocateCFunctionInArray(name,table);
+ if rs.found then begin
+   result := 1;
+   lua_pushcfunction(L,rs.reg.func);
+ end;
 end;
 
 // Convert the last item at 'Index' from the stack to a string

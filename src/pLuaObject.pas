@@ -12,9 +12,12 @@ unit pLuaObject;
 
 {$IFDEF FPC}
 {$mode objfpc}{$H+}
+{$TYPEDADDRESS ON}
 {$ENDIF}
 
 interface
+
+{$I Lua.inc}
 
 uses
   Classes, SysUtils, lua, pLua, uWordList;
@@ -606,7 +609,7 @@ function plua_ObjectEventExists(ObjectInfo: PLuaInstanceInfo;
   EventName: String): Boolean;
 begin
   plua_PushObject(ObjectInfo);
-  result := plua_functionexists_noc(ObjectInfo^.l, EventName, lua_gettop(ObjectInfo^.l));
+  result := plua_functionexists(ObjectInfo^.l, EventName, lua_gettop(ObjectInfo^.l), false);
   lua_pop(ObjectInfo^.L, 1);
 end;
 
